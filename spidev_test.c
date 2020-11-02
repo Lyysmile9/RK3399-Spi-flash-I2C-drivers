@@ -30,15 +30,15 @@ static void pabort(const char *s)
 	abort();
 }
 
-static const char *device = "/dev/spidev1.1";
+static const char *device = "/dev/w25q64";
 static uint32_t mode;
 static uint8_t bits = 8;
-static uint32_t speed = 500000;
+static uint32_t speed = 24000000;
 static uint16_t delay;
-static int verbose;
+static int verbose = 1;
 
 uint8_t default_tx[] = {
-	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0xFF,
 	0x40, 0x00, 0x00, 0x00, 0x00, 0x95,
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -309,7 +309,11 @@ int main(int argc, char *argv[])
 		free(rx);
 		free(tx);
 	} else {
-		transfer(fd, default_tx, default_rx, sizeof(default_tx));
+		//transfer(fd, default_tx, default_rx, sizeof(default_tx));
+		write(fd, default_tx, sizeof(default_tx));
+		read(fd, default_rx, sizeof(default_rx));
+		for (int i = 0; i < ARRAY_SIZE(default_rx); i++)
+			printf("receive data:%x\n", default_rx[i]);
 	}
 
 	close(fd);
