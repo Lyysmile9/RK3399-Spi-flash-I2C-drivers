@@ -21,6 +21,7 @@
 #include <sys/ioctl.h>
 #include <linux/types.h>
 #include <linux/spi/spidev.h>
+#include "w25q64.h"
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
@@ -256,12 +257,15 @@ int main(int argc, char *argv[])
 	uint8_t *tx;
 	uint8_t *rx;
 	int size;
+	unsigned int offset;
 
 	parse_opts(argc, argv);
 
 	fd = open(device, O_RDWR);
 	if (fd < 0)
 		pabort("can't open device");
+
+	lseek(fd, 0, SEEK_SET);
 
 	/*
 	 * spi mode
@@ -310,12 +314,49 @@ int main(int argc, char *argv[])
 		free(tx);
 	} else {
 		//transfer(fd, default_tx, default_rx, sizeof(default_tx));
+		unsigned int ret;
+		for (int i = 0; i < 3; i++) {
+			write(fd, default_tx, sizeof(default_tx));
+			read(fd, default_rx, sizeof(default_rx));
+			offset = sizeof(default_tx);
+			ret = lseek(fd, offset, SEEK_CUR);
+			printf("current addr:%d\n", ret);
+
+			for (int i = 0; i < ARRAY_SIZE(default_rx); i++)
+				printf("receive data:%x\t\n", default_rx[i]);
+		}
+
+		lseek(fd, 0, SEEK_SET);
+		printf("erase sector\n");
+		ioctl(fd, W25Q64_IOC_SECTOR_ERASE);
+		read(fd, default_rx, sizeof(default_rx));
+		for (int i = 0; i < ARRAY_SIZE(default_rx); i++)
+			printf("revice data should be 0XFF:%x\t\n", default_rx[i]);
+
+		lseek(fd, 0x8000, SEEK_CUR);
 		write(fd, default_tx, sizeof(default_tx));
 		read(fd, default_rx, sizeof(default_rx));
 		for (int i = 0; i < ARRAY_SIZE(default_rx); i++)
-			printf("receive data:%x\n", default_rx[i]);
-	}
+				printf("receive data:%x\t\n", default_rx[i]);
 
+		printf("erase 32kb block\n");
+		ioctl(fd, W25Q64_IOC_32KB_BLOCK_ERASE);
+		read(fd, default_rx, sizeof(default_rx));
+		for (int i = 0; i < ARRAY_SIZE(default_rx); i++)
+			printf("revice data should be 0XFF:%x\t\n", default_rx[i]);
+
+		printf("erase 64kb block\n");
+		lseek(fd, 0, SEEK_SET);
+		write(fd, default_tx, sizeof(default_tx));
+		read(fd, default_rx, sizeof(default_rx));
+		for (int i = 0; i < ARRAY_SIZE(default_rx); i++)
+				printf("receive data:%x\t\n", default_rx[i]);
+
+		ioctl(fd, W25Q64_IOC_64KB_BLOCK_ERASE);
+		read(fd, default_rx, sizeof(default_rx));
+		for (int i = 0; i < ARRAY_SIZE(default_rx); i++)
+			printf("revice data should be 0XFF:%x\t\n", default_rx[i]);
+	}
 	close(fd);
 
 	return ret;
