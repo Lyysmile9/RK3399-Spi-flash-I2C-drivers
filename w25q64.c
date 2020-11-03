@@ -15,7 +15,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-
+#define DEBUG
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/ioctl.h>
@@ -36,6 +36,7 @@
 
 #include <linux/uaccess.h>
 #include <linux/of_gpio.h>
+#include "w25q64.h"
 
 /*
  * This supports access to SPI devices using normal userspace I/O calls.
@@ -98,6 +99,8 @@ struct spidev_data {
 	u8			*tx_buffer;
 	u8			*rx_buffer;
 	u32			speed_hz;
+	unsigned int cur_addr;
+	unsigned wp_gpio;
 };
 
 static LIST_HEAD(device_list);
@@ -136,13 +139,13 @@ static char firefly_spi_w25x_status(struct spi_device *spi)
 static int firefly_spi_w25x_wait_ready(struct spi_device *spi )
 {
 	char retval = 1;
-	printk("%s wait ready...", __func__);
+	dev_dbg(&spi->dev, "wait ready...");
 	do {
 		retval = firefly_spi_w25x_status(spi);
 		retval &= 0xff;
 		retval &= 1;
 	}while(retval != 0);
-	printk("%s OK\n", __func__);
+	dev_dbg(&spi->dev, "OK\n");
 	return 0;
 }
 
@@ -162,7 +165,7 @@ static int firefly_spi_w25x_write_enable(struct spi_device *spi)
 
 	status = spi_sync(spi, &m);
 
-	printk("%s status = %d\n", __FUNCTION__, status);
+	dev_dbg(&spi->dev, "write enable\n");
 
 	return status;
 }
@@ -189,69 +192,86 @@ static int firefly_spi_read_w25x_id_0(struct spi_device *spi)
 	spi_message_add_tail(&r, &m);
 	status = spi_sync(spi, &m);
 
-	printk("%s ID = %02x %02x %02x %02x %02x\n", __FUNCTION__, rbuf[0], rbuf[1], rbuf[2], rbuf[3], rbuf[4]);
+	dev_dbg(&spi->dev, "ID = %02x %02x %02x %02x %02x\n",
+		rbuf[0], rbuf[1], rbuf[2], rbuf[3], rbuf[4]);
 	return status;
 }
 
-static int firefly_spi_write_w25x(struct spi_device *spi)
-{       
-	int     status, i;
-	char cmd [1] = {PAGE_PROGRAM};
-	char tbuf[260]={0x00, 0x00, 0x00};
-	struct spi_transfer c = {
+static int
+firefly_spi_w25x_sector_erase(struct spidev_data *spidev)
+{
+	int status;
+	char cmd[4] = {SECTOR_ERASE};
+	struct spi_device *spi = spidev->spi;
+	struct spi_transfer t = {
 		.tx_buf = cmd,
 		.len = ARRAY_SIZE(cmd),
 	};
-	struct spi_transfer t = {
-		.tx_buf         = tbuf,
-		.len            = ARRAY_SIZE(tbuf),
-	};
-	
-	struct spi_message      m;
+	struct spi_message m;
 
-	for (i = 0; i < 256; i++)
-		tbuf[4 + i] = i;
+	cmd[1] = (unsigned char)((spidev->cur_addr & 0xff0000) >> 16);
+	cmd[2] = (unsigned char)((spidev->cur_addr & 0xff00) >> 8);
+	cmd[3] = (unsigned char)(spidev->cur_addr & 0xff);
 
 	firefly_spi_w25x_write_enable(spi);
 
 	spi_message_init(&m);
-	spi_message_add_tail(&c, &m);
 	spi_message_add_tail(&t, &m);
-
 	status = spi_sync(spi, &m);
 	firefly_spi_w25x_wait_ready(spi);
-
+	dev_dbg(&spi->dev,"sector erase OK\n");
 	return status;
 }
 
-static int firefly_spi_read_w25x(struct spi_device *spi)
-{       
-	int     status, i;
-	char tbuf[]={READ_DATA, 0x00, 0x00, 0x00};
-	char rbuf[256] = {1};
-#if 0
-	for (i = 0; i < 260; i++)
-		tbuf[4] = 0;
-#endif
-	struct spi_transfer     t = {
-		.tx_buf         = tbuf,
-		.len            = ARRAY_SIZE(tbuf),
+static int
+firefly_spi_w25x_32kb_block_erase(struct spidev_data *spidev)
+{
+	int status;
+	char cmd[4] = {BLOCK_32KB_ERASE};
+	struct spi_device *spi = spidev->spi;
+	struct spi_transfer t = {
+		.tx_buf = cmd,
+		.len = ARRAY_SIZE(cmd),
 	};
+	struct spi_message m;
 
-	struct spi_transfer     r = {
-		.rx_buf         = rbuf,
-		.len            = ARRAY_SIZE(rbuf),
-	};
-	struct spi_message      m;
+	cmd[1] = (unsigned char)((spidev->cur_addr & 0xff0000) >> 16);
+	cmd[2] = (unsigned char)((spidev->cur_addr & 0xff00) >> 8);
+	cmd[3] = (unsigned char)(spidev->cur_addr & 0xff);
+
+	firefly_spi_w25x_write_enable(spi);
 
 	spi_message_init(&m);
 	spi_message_add_tail(&t, &m);
-	spi_message_add_tail(&r, &m);
 	status = spi_sync(spi, &m);
-	for (i = 0; i < 10; i++)
-		printk("recive data:%x\t\n", rbuf[i]);
 	firefly_spi_w25x_wait_ready(spi);
+	dev_dbg(&spi->dev,"32kb block erase OK\n");
+	return status;
+}
 
+static int
+firefly_spi_w25x_64kb_block_erase(struct spidev_data *spidev)
+{
+	int status;
+	char cmd[4] = {BLOCK_64KB_ERASE};
+	struct spi_device *spi = spidev->spi;
+	struct spi_transfer t = {
+		.tx_buf = cmd,
+		.len = ARRAY_SIZE(cmd),
+	};
+	struct spi_message m;
+
+	cmd[1] = (unsigned char)((spidev->cur_addr & 0xff0000) >> 16);
+	cmd[2] = (unsigned char)((spidev->cur_addr & 0xff00) >> 8);
+	cmd[3] = (unsigned char)(spidev->cur_addr & 0xff);
+
+	firefly_spi_w25x_write_enable(spi);
+
+	spi_message_init(&m);
+	spi_message_add_tail(&t, &m);
+	status = spi_sync(spi, &m);
+	firefly_spi_w25x_wait_ready(spi);
+	dev_dbg(&spi->dev,"64kb block erase OK\n");
 	return status;
 }
 
@@ -271,9 +291,50 @@ static int firefly_spi_w25x_chip_erase(struct spi_device *spi)
 	spi_message_init(&m);
 	spi_message_add_tail(&erase, &m);
 	status = spi_sync(spi, &m);
-	printk("%s erase chip...", __func__);
 	firefly_spi_w25x_wait_ready(spi);
+	dev_dbg(&spi->dev,"chip erase OK\n");
 	return status;
+}
+
+static loff_t
+firefly_spi_w25x_llseek(struct file *filp, loff_t offset, int orig)
+{
+	loff_t ret = 0;
+	struct spidev_data	*spidev;
+
+	spidev = filp->private_data;
+	switch (orig) {
+	case SEEK_SET:
+		if (offset < 0) {
+			ret = -EINVAL;
+			break;
+		}
+		if ((unsigned int)offset > W25Q64_SIZE) {
+			ret = -EINVAL;
+			break;
+		}
+		spidev->cur_addr = (unsigned int)offset;
+		ret = spidev->cur_addr;
+		break;
+	case SEEK_CUR:
+		if ((spidev->cur_addr + offset) > W25Q64_SIZE) {
+			ret = -EINVAL;
+			break;
+		}
+		if ((spidev->cur_addr + offset) < 0) {
+			ret = -EINVAL;
+			break;
+		}
+		spidev->cur_addr += offset;
+		ret = spidev->cur_addr;
+		break;
+	default:
+		ret =  - EINVAL;
+		break;
+	}
+	dev_dbg(&spidev->spi->dev, "set curr addr:%02X\n", (unsigned int)ret);
+	return ret;
+
 }
 
 static ssize_t
@@ -303,26 +364,35 @@ spidev_sync_write(struct spidev_data *spidev, size_t len)
 {
 	int status;
 	char cmd[1] = {PAGE_PROGRAM};
-	struct spi_transfer c = {
-		.tx_buf = cmd,
-		.len = ARRAY_SIZE(cmd),
+	unsigned char addr[3];
+	struct spi_transfer c[] = {
+		{
+			.tx_buf = cmd,
+			.len = ARRAY_SIZE(cmd),
+		},
+		{
+			.tx_buf = addr,
+			.len = ARRAY_SIZE(addr),
+		},
 	};
 	struct spi_transfer t = {
 			.tx_buf		= spidev->tx_buffer,
 			.len		= len,
 			.speed_hz	= spidev->speed_hz,
-		
 	};
 	struct spi_message	m;
+
+	addr[0] = (unsigned char)((spidev->cur_addr & 0xff0000) >> 16);
+	addr[1] = (unsigned char)((spidev->cur_addr & 0xff00) >> 8);
+	addr[2] = (unsigned char)(spidev->cur_addr & 0xff);
 
 	firefly_spi_w25x_write_enable(spidev->spi);
 
 	spi_message_init(&m);
-	spi_message_add_tail(&c, &m);
+	spi_message_add_tail(&c[0], &m);
+	spi_message_add_tail(&c[1], &m);
 	spi_message_add_tail(&t, &m);
 	status = spidev_sync(spidev, &m);
-	printk(KERN_ALERT "write data:%x %x %x %x %x\n", spidev->tx_buffer[0], spidev->tx_buffer[1],
-		spidev->tx_buffer[2], spidev->tx_buffer[3], spidev->tx_buffer[4]);
 	firefly_spi_w25x_wait_ready(spidev->spi);
 	return status;
 }
@@ -332,11 +402,16 @@ spidev_sync_read(struct spidev_data *spidev, size_t len)
 {
 	int status;
 	char cmd[] = {READ_DATA};
+	unsigned char addr[3];
 	struct spi_transfer	t[] = {
 		{
-			.tx_buf = &cmd[0],
+			.tx_buf = cmd,
 			.len = ARRAY_SIZE(cmd),
 			.speed_hz = spidev->speed_hz,
+		},
+		{
+			.tx_buf = addr,
+			.len = ARRAY_SIZE(addr),
 		},
 		{
 			.rx_buf		= spidev->rx_buffer,
@@ -346,17 +421,18 @@ spidev_sync_read(struct spidev_data *spidev, size_t len)
 	};
 	struct spi_message	m;
 
+	addr[0] = (unsigned char)((spidev->cur_addr & 0xff0000) >> 16);
+	addr[1] = (unsigned char)((spidev->cur_addr & 0xff00) >> 8);
+	addr[2] = (unsigned char)(spidev->cur_addr & 0xff);
+
 	spi_message_init(&m);
 	spi_message_add_tail(&t[0], &m);
 	spi_message_add_tail(&t[1], &m);
+	spi_message_add_tail(&t[2], &m);
 	status = spidev_sync(spidev, &m);
-	printk(KERN_ALERT "revice buf: %x %x %x %x %x\n", spidev->rx_buffer[0], spidev->rx_buffer[1],
-		spidev->rx_buffer[2], spidev->rx_buffer[3], spidev->rx_buffer[4]);
 	firefly_spi_w25x_wait_ready(spidev->spi);
 	return status;
 }
-
-/*-------------------------------------------------------------------------*/
 
 /* Read-only message with current device setup */
 static ssize_t
@@ -402,6 +478,7 @@ spidev_write(struct file *filp, const char __user *buf,
 
 	spidev = filp->private_data;
 
+	gpio_set_value(spidev->wp_gpio, 1);
 	mutex_lock(&spidev->buf_lock);
 	missing = copy_from_user(spidev->tx_buffer, buf, count);
 	if (missing == 0)
@@ -409,155 +486,9 @@ spidev_write(struct file *filp, const char __user *buf,
 	else
 		status = -EFAULT;
 	mutex_unlock(&spidev->buf_lock);
+	gpio_set_value(spidev->wp_gpio, 0);
 
 	return status;
-}
-
-static int spidev_message(struct spidev_data *spidev,
-		struct spi_ioc_transfer *u_xfers, unsigned n_xfers)
-{
-	struct spi_message	msg;
-	struct spi_transfer	*k_xfers;
-	struct spi_transfer	*k_tmp;
-	struct spi_ioc_transfer *u_tmp;
-	unsigned		n, total, tx_total, rx_total;
-	u8			*tx_buf, *rx_buf;
-	int			status = -EFAULT;
-
-	spi_message_init(&msg);
-	k_xfers = kcalloc(n_xfers, sizeof(*k_tmp), GFP_KERNEL);
-	if (k_xfers == NULL)
-		return -ENOMEM;
-
-	/* Construct spi_message, copying any tx data to bounce buffer.
-	 * We walk the array of user-provided transfers, using each one
-	 * to initialize a kernel version of the same transfer.
-	 */
-	tx_buf = spidev->tx_buffer;
-	rx_buf = spidev->rx_buffer;
-	total = 0;
-	tx_total = 0;
-	rx_total = 0;
-	for (n = n_xfers, k_tmp = k_xfers, u_tmp = u_xfers;
-			n;
-			n--, k_tmp++, u_tmp++) {
-		k_tmp->len = u_tmp->len;
-
-		total += k_tmp->len;
-		/* Since the function returns the total length of transfers
-		 * on success, restrict the total to positive int values to
-		 * avoid the return value looking like an error.  Also check
-		 * each transfer length to avoid arithmetic overflow.
-		 */
-		if (total > INT_MAX || k_tmp->len > INT_MAX) {
-			status = -EMSGSIZE;
-			goto done;
-		}
-
-		if (u_tmp->rx_buf) {
-			/* this transfer needs space in RX bounce buffer */
-			rx_total += k_tmp->len;
-			if (rx_total > bufsiz) {
-				status = -EMSGSIZE;
-				goto done;
-			}
-			k_tmp->rx_buf = rx_buf;
-			if (!access_ok(VERIFY_WRITE, (u8 __user *)
-						(uintptr_t) u_tmp->rx_buf,
-						u_tmp->len))
-				goto done;
-			rx_buf += k_tmp->len;
-		}
-		if (u_tmp->tx_buf) {
-			/* this transfer needs space in TX bounce buffer */
-			tx_total += k_tmp->len;
-			if (tx_total > bufsiz) {
-				status = -EMSGSIZE;
-				goto done;
-			}
-			k_tmp->tx_buf = tx_buf;
-			if (copy_from_user(tx_buf, (const u8 __user *)
-						(uintptr_t) u_tmp->tx_buf,
-					u_tmp->len))
-				goto done;
-			tx_buf += k_tmp->len;
-		}
-
-		k_tmp->cs_change = !!u_tmp->cs_change;
-		k_tmp->tx_nbits = u_tmp->tx_nbits;
-		k_tmp->rx_nbits = u_tmp->rx_nbits;
-		k_tmp->bits_per_word = u_tmp->bits_per_word;
-		k_tmp->delay_usecs = u_tmp->delay_usecs;
-		k_tmp->speed_hz = u_tmp->speed_hz;
-		if (!k_tmp->speed_hz)
-			k_tmp->speed_hz = spidev->speed_hz;
-#ifdef VERBOSE
-		dev_dbg(&spidev->spi->dev,
-			"  xfer len %zd %s%s%s%dbits %u usec %uHz\n",
-			u_tmp->len,
-			u_tmp->rx_buf ? "rx " : "",
-			u_tmp->tx_buf ? "tx " : "",
-			u_tmp->cs_change ? "cs " : "",
-			u_tmp->bits_per_word ? : spidev->spi->bits_per_word,
-			u_tmp->delay_usecs,
-			u_tmp->speed_hz ? : spidev->spi->max_speed_hz);
-#endif
-		spi_message_add_tail(k_tmp, &msg);
-	}
-
-	status = spidev_sync(spidev, &msg);
-	if (status < 0)
-		goto done;
-
-	/* copy any rx data out of bounce buffer */
-	rx_buf = spidev->rx_buffer;
-	for (n = n_xfers, u_tmp = u_xfers; n; n--, u_tmp++) {
-		if (u_tmp->rx_buf) {
-			if (__copy_to_user((u8 __user *)
-					(uintptr_t) u_tmp->rx_buf, rx_buf,
-					u_tmp->len)) {
-				status = -EFAULT;
-				goto done;
-			}
-			rx_buf += u_tmp->len;
-		}
-	}
-	status = total;
-
-done:
-	kfree(k_xfers);
-	return status;
-}
-
-static struct spi_ioc_transfer *
-spidev_get_ioc_message(unsigned int cmd, struct spi_ioc_transfer __user *u_ioc,
-		unsigned *n_ioc)
-{
-	struct spi_ioc_transfer	*ioc;
-	u32	tmp;
-
-	/* Check type, command number and direction */
-	if (_IOC_TYPE(cmd) != SPI_IOC_MAGIC
-			|| _IOC_NR(cmd) != _IOC_NR(SPI_IOC_MESSAGE(0))
-			|| _IOC_DIR(cmd) != _IOC_WRITE)
-		return ERR_PTR(-ENOTTY);
-
-	tmp = _IOC_SIZE(cmd);
-	if ((tmp % sizeof(struct spi_ioc_transfer)) != 0)
-		return ERR_PTR(-EINVAL);
-	*n_ioc = tmp / sizeof(struct spi_ioc_transfer);
-	if (*n_ioc == 0)
-		return NULL;
-
-	/* copy into scratch area */
-	ioc = kmalloc(tmp, GFP_KERNEL);
-	if (!ioc)
-		return ERR_PTR(-ENOMEM);
-	if (__copy_from_user(ioc, u_ioc, tmp)) {
-		kfree(ioc);
-		return ERR_PTR(-EFAULT);
-	}
-	return ioc;
 }
 
 static long
@@ -568,11 +499,9 @@ spidev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	struct spidev_data	*spidev;
 	struct spi_device	*spi;
 	u32			tmp;
-	unsigned		n_ioc;
-	struct spi_ioc_transfer	*ioc;
 
 	/* Check type and command number */
-	if (_IOC_TYPE(cmd) != SPI_IOC_MAGIC)
+	if (_IOC_TYPE(cmd) != W25Q64_MAGIC)
 		return -ENOTTY;
 
 	/* Check access direction once here; don't repeat below.
@@ -609,6 +538,18 @@ spidev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	switch (cmd) {
 	/* read requests */
+	case W25Q64_IOC_SECTOR_ERASE:
+		retval = firefly_spi_w25x_sector_erase(spidev);
+		break;
+	case W25Q64_IOC_32KB_BLOCK_ERASE:
+		retval = firefly_spi_w25x_32kb_block_erase(spidev);
+		break;
+	case W25Q64_IOC_64KB_BLOCK_ERASE:
+		retval = firefly_spi_w25x_64kb_block_erase(spidev);
+		break;
+	case W25Q64_IOC_CHIP_ERASE:
+		retval = firefly_spi_w25x_chip_erase(spi);
+		break;
 	case SPI_IOC_RD_MODE:
 		retval = __put_user(spi->mode & SPI_MODE_MASK,
 					(__u8 __user *)arg);
@@ -696,23 +637,9 @@ spidev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			spi->max_speed_hz = save;
 		}
 		break;
+		default:
+			return -EINVAL;
 
-	default:
-		/* segmented and/or full-duplex I/O request */
-		/* Check message and copy into scratch area */
-		ioc = spidev_get_ioc_message(cmd,
-				(struct spi_ioc_transfer __user *)arg, &n_ioc);
-		if (IS_ERR(ioc)) {
-			retval = PTR_ERR(ioc);
-			break;
-		}
-		if (!ioc)
-			break;	/* n_ioc is also 0 */
-
-		/* translate to spi_message, execute */
-		retval = spidev_message(spidev, ioc, n_ioc);
-		kfree(ioc);
-		break;
 	}
 
 	mutex_unlock(&spidev->buf_lock);
@@ -722,67 +649,8 @@ spidev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 #ifdef CONFIG_COMPAT
 static long
-spidev_compat_ioc_message(struct file *filp, unsigned int cmd,
-		unsigned long arg)
-{
-	struct spi_ioc_transfer __user	*u_ioc;
-	int				retval = 0;
-	struct spidev_data		*spidev;
-	struct spi_device		*spi;
-	unsigned			n_ioc, n;
-	struct spi_ioc_transfer		*ioc;
-
-	u_ioc = (struct spi_ioc_transfer __user *) compat_ptr(arg);
-	if (!access_ok(VERIFY_READ, u_ioc, _IOC_SIZE(cmd)))
-		return -EFAULT;
-
-	/* guard against device removal before, or while,
-	 * we issue this ioctl.
-	 */
-	spidev = filp->private_data;
-	spin_lock_irq(&spidev->spi_lock);
-	spi = spi_dev_get(spidev->spi);
-	spin_unlock_irq(&spidev->spi_lock);
-
-	if (spi == NULL)
-		return -ESHUTDOWN;
-
-	/* SPI_IOC_MESSAGE needs the buffer locked "normally" */
-	mutex_lock(&spidev->buf_lock);
-
-	/* Check message and copy into scratch area */
-	ioc = spidev_get_ioc_message(cmd, u_ioc, &n_ioc);
-	if (IS_ERR(ioc)) {
-		retval = PTR_ERR(ioc);
-		goto done;
-	}
-	if (!ioc)
-		goto done;	/* n_ioc is also 0 */
-
-	/* Convert buffer pointers */
-	for (n = 0; n < n_ioc; n++) {
-		ioc[n].rx_buf = (uintptr_t) compat_ptr(ioc[n].rx_buf);
-		ioc[n].tx_buf = (uintptr_t) compat_ptr(ioc[n].tx_buf);
-	}
-
-	/* translate to spi_message, execute */
-	retval = spidev_message(spidev, ioc, n_ioc);
-	kfree(ioc);
-
-done:
-	mutex_unlock(&spidev->buf_lock);
-	spi_dev_put(spi);
-	return retval;
-}
-
-static long
 spidev_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	if (_IOC_TYPE(cmd) == SPI_IOC_MAGIC
-			&& _IOC_NR(cmd) == _IOC_NR(SPI_IOC_MESSAGE(0))
-			&& _IOC_DIR(cmd) == _IOC_WRITE)
-		return spidev_compat_ioc_message(filp, cmd, arg);
-
 	return spidev_ioctl(filp, cmd, (unsigned long)compat_ptr(arg));
 }
 #else
@@ -828,7 +696,6 @@ static int spidev_open(struct inode *inode, struct file *filp)
 
 	spidev->users++;
 	filp->private_data = spidev;
-	nonseekable_open(inode, filp);
 
 	mutex_unlock(&device_list_lock);
 	return 0;
@@ -888,7 +755,7 @@ static const struct file_operations spidev_fops = {
 	.compat_ioctl = spidev_compat_ioctl,
 	.open =		spidev_open,
 	.release =	spidev_release,
-	.llseek =	no_llseek,
+	.llseek =	firefly_spi_w25x_llseek,
 };
 
 /*-------------------------------------------------------------------------*/
@@ -902,8 +769,6 @@ static struct class *spidev_class;
 
 #ifdef CONFIG_OF
 static const struct of_device_id spidev_dt_ids[] = {
-	{ .compatible = "rohm,dh2228fv" },
-	{ .compatible = "lineartechnology,ltc2488" },
 	{ .compatible = "rockchip,spidev" },
 	{},
 };
@@ -917,9 +782,8 @@ static int spidev_probe(struct spi_device *spi)
 	struct spidev_data	*spidev;
 	struct device_node *np = spi->dev.of_node;
 	int			status;
-	unsigned wp_gpio;
 	unsigned long		minor;
-	printk("%s\n", __func__);
+	dev_dbg(&spi->dev, "probe\n");
 	/*
 	 * spidev should never be referenced in DT without a specific
 	 * compatible string, it is a Linux implementation thing
@@ -972,21 +836,15 @@ static int spidev_probe(struct spi_device *spi)
 	else
 		kfree(spidev);
 
-	wp_gpio = of_get_named_gpio(np, "wp-gpio", 0);
-	status = gpio_request(wp_gpio, "wp-gpio");
+	spidev->wp_gpio = of_get_named_gpio(np, "wp-gpio", 0);
+	status = gpio_request(spidev->wp_gpio, "wp-gpio");
 	if (status)
 		return -ENODEV;
 
-	gpio_direction_output(wp_gpio, 1);
-	gpio_set_value(wp_gpio, 1);
-	gpio_export(wp_gpio, 0);
+	gpio_direction_output(spidev->wp_gpio, 0);
+	gpio_export(spidev->wp_gpio, 0);
 	
-	printk("Read w25q64 uid\n");
 	firefly_spi_read_w25x_id_0(spi);
-	
-	firefly_spi_w25x_chip_erase(spi);
-	firefly_spi_write_w25x(spi);
-	firefly_spi_read_w25x(spi);
 
 	return status;
 }
@@ -994,11 +852,8 @@ static int spidev_probe(struct spi_device *spi)
 static int spidev_remove(struct spi_device *spi)
 {
 	struct spidev_data	*spidev = spi_get_drvdata(spi);
-	struct device_node *np = spi->dev.of_node;
-	unsigned wp_gpio;
 
-	wp_gpio = of_get_named_gpio(np, "wp-gpio", 0);
-	gpio_free(wp_gpio);
+	gpio_free(spidev->wp_gpio);
 
 	/* make sure ops on existing fds can abort cleanly */
 	spin_lock_irq(&spidev->spi_lock);
@@ -1037,7 +892,6 @@ static struct spi_driver spidev_spi_driver = {
 static int __init spidev_init(void)
 {
 	int status;
-	printk("%s\n", __func__);
 	
 	/* Claim our 256 reserved device numbers.  Then register a class
 	 * that will key udev/mdev to add/remove /dev nodes.  Last, register
@@ -1071,6 +925,6 @@ static void __exit spidev_exit(void)
 }
 module_exit(spidev_exit);
 
-MODULE_AUTHOR("Andrea Paterniani, <a.paterniani@swapp-eng.it>");
+MODULE_AUTHOR("jfhuang@raysees.com");
 MODULE_DESCRIPTION("User mode SPI device interface");
 MODULE_LICENSE("GPL");
