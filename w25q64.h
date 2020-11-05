@@ -5,6 +5,10 @@
 #include <linux/ioctl.h>
 
 #define W25Q64_SIZE 0x800000
+#define W25Q64_PAGE_LENGTH	256
+#define W25Q64_SECTOR	4096
+#define W25Q64_32KB_BLOCK 32768
+#define W25Q64_64KB_BLOCK 65536
 
 /* IOCTL commands */
 #define W25Q64_MAGIC			'k'
