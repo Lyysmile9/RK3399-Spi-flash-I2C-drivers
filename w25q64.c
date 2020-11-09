@@ -198,7 +198,7 @@ static int firefly_spi_read_w25x_id_0(struct spi_device *spi)
 }
 
 static int
-firefly_spi_w25x_sector_erase(struct spidev_data *spidev)
+firefly_spi_w25x_sector_erase(struct spidev_data *spidev, unsigned long size)
 {
 	int status;
 	char cmd[4] = {SECTOR_ERASE};
@@ -208,18 +208,23 @@ firefly_spi_w25x_sector_erase(struct spidev_data *spidev)
 		.len = ARRAY_SIZE(cmd),
 	};
 	struct spi_message m;
+	unsigned int flash_addr = spidev->cur_addr;
+	int count = (int)size;
 
-	cmd[1] = (unsigned char)((spidev->cur_addr & 0xff0000) >> 16);
-	cmd[2] = (unsigned char)((spidev->cur_addr & 0xff00) >> 8);
-	cmd[3] = (unsigned char)(spidev->cur_addr & 0xff);
+	for ( ; count > 0; count -= W25Q64_SECTOR) {
+		cmd[1] = (unsigned char)((flash_addr & 0xff0000) >> 16);
+		cmd[2] = (unsigned char)((flash_addr & 0xff00) >> 8);
+		cmd[3] = (unsigned char)(flash_addr & 0xff);
 
-	firefly_spi_w25x_write_enable(spi);
+		firefly_spi_w25x_write_enable(spi);
 
-	spi_message_init(&m);
-	spi_message_add_tail(&t, &m);
-	status = spi_sync(spi, &m);
-	firefly_spi_w25x_wait_ready(spi);
-	dev_dbg(&spi->dev,"sector erase OK\n");
+		spi_message_init(&m);
+		spi_message_add_tail(&t, &m);
+		status = spi_sync(spi, &m);
+		firefly_spi_w25x_wait_ready(spi);
+		dev_dbg(&spi->dev,"start addr: %x, sector erase OK\n", flash_addr);
+		flash_addr += W25Q64_SECTOR;
+	}
 	return status;
 }
 
@@ -539,7 +544,7 @@ spidev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	/* read requests */
 	case W25Q64_IOC_SECTOR_ERASE:
-		retval = firefly_spi_w25x_sector_erase(spidev);
+		retval = firefly_spi_w25x_sector_erase(spidev, arg);
 		break;
 	case W25Q64_IOC_32KB_BLOCK_ERASE:
 		retval = firefly_spi_w25x_32kb_block_erase(spidev);
