@@ -174,27 +174,27 @@ static int firefly_i2c_master_send(struct m031_data *m031dev, size_t len)
 	struct i2c_client *client = m031dev->m031_client;
 	struct i2c_adapter *adap = client->adapter;
 	struct i2c_msg msg;
-	size_t count = len;
+	size_t size = len;
+	unsigned char *buffer;
+	unsigned int count = 0;
 	unsigned int flash_addr = m031dev->cur_addr;
 
 	while (len > 0) {
-		unsigned char *buffer;
-		unsigned int count = 0;
+		printk("send len:%ld\n", len);
 		firefly_wait_flash_ready(m031dev);
 		if (len > W25Q64_PAGE_LENGTH) {
 			buffer = kzalloc(W25Q64_PAGE_LENGTH + 7, GFP_KERNEL);
 			if (!buffer)
 				return-ENOMEM;
-
+			/*assign flag & flash addr & data size*/
 			buffer[0] = write_flash;
 			buffer[1] = (unsigned char)((flash_addr & 0xff0000) >> 16);
 			buffer[2] = (unsigned char)((flash_addr & 0xff00) >> 8);
 			buffer[3] = (unsigned char)(flash_addr & 0xff);
-
 			buffer[4] = (unsigned char)((W25Q64_PAGE_LENGTH & 0xff0000) >> 16);
 			buffer[5] = (unsigned char)((W25Q64_PAGE_LENGTH & 0xff00) >> 8);
 			buffer[6] = (unsigned char)(W25Q64_PAGE_LENGTH & 0xff);
-
+			/*copy data to buffer*/
 			memcpy(&buffer[7], &m031dev->tx_buffer[count], W25Q64_PAGE_LENGTH);
 
 			msg.addr = client->addr;
@@ -205,7 +205,7 @@ static int firefly_i2c_master_send(struct m031_data *m031dev, size_t len)
 			if (ret == 1)
 				dev_dbg(&client->dev, "transmit: 256 byte\n");
 			else
-				return ret;
+				goto exit;
 
 			count += W25Q64_PAGE_LENGTH;
 			len -= W25Q64_PAGE_LENGTH;
@@ -232,9 +232,9 @@ static int firefly_i2c_master_send(struct m031_data *m031dev, size_t len)
 			msg.buf = buffer;
 			ret = i2c_transfer(adap, &msg, 1);
 			if (ret == 1)
-				dev_dbg(&client->dev, "transmit: %d byte\n", msg.len);
+				dev_dbg(&client->dev, "transmit: %d byte\n", msg.len - 7);
 			else
-				return ret;
+				goto exit;
 
 			count += len;
 			len = 0;
@@ -247,7 +247,10 @@ static int firefly_i2c_master_send(struct m031_data *m031dev, size_t len)
 	 * If everything went ok (i.e. 1 msg transmitted), return #bytes
 	 * transmitted, else error code.
 	 */
-	return (ret == 1) ? count : ret;
+exit:
+	if (buffer)
+		kfree(buffer);
+	return (ret == 1) ? size : ret;
 }
 
 static ssize_t m031_write(struct file *filp, const char __user *buf,
@@ -279,13 +282,13 @@ static int firefly_i2c_master_recv(struct m031_data *m031dev, size_t len)
 	struct i2c_client *client = m031dev->m031_client;
 	struct i2c_adapter *adap = client->adapter;
 	struct i2c_msg msg[2];
-	size_t count = len;
+	size_t size = len;
+	unsigned int count = 0;
+	unsigned char *buffer;
 	unsigned int flash_addr = m031dev->cur_addr;
 
 	while(len > 0) {
-		unsigned char *buffer;
 		unsigned char head_info[7];
-		unsigned int count = 0;
 		firefly_wait_flash_ready(m031dev);
 		if (len > W25Q64_PAGE_LENGTH) {
 			head_info[0] = read_flash;
@@ -305,7 +308,7 @@ static int firefly_i2c_master_recv(struct m031_data *m031dev, size_t len)
 			if (ret == 1)
 				dev_dbg(&client->dev, "transmit: %d byte\n", msg[0].len);
 			else
-				return ret;
+				goto exit;
 			
 			buffer = kzalloc(W25Q64_PAGE_LENGTH, GFP_KERNEL);
 			if (!buffer)
@@ -319,9 +322,10 @@ static int firefly_i2c_master_recv(struct m031_data *m031dev, size_t len)
 			if (ret == 1)
 				dev_dbg(&client->dev, "transmit: 256 byte\n");
 			else
-				return ret;
+				goto exit;
 
 			memcpy(&m031dev->rx_buffer[count], &buffer[count], W25Q64_PAGE_LENGTH);
+
 			count += W25Q64_PAGE_LENGTH;
 			len -= W25Q64_PAGE_LENGTH;
 			flash_addr += W25Q64_PAGE_LENGTH;
@@ -343,7 +347,7 @@ static int firefly_i2c_master_recv(struct m031_data *m031dev, size_t len)
 			if (ret == 1)
 				dev_dbg(&client->dev, "transmit: %d byte\n", msg[0].len);
 			else
-				return ret;
+				goto exit;
 			
 			buffer = kzalloc(len, GFP_KERNEL);
 			if (!buffer)
@@ -357,9 +361,10 @@ static int firefly_i2c_master_recv(struct m031_data *m031dev, size_t len)
 			if (ret == 1)
 				dev_dbg(&client->dev, "transmit: %ld byte\n", len);
 			else
-				return ret;
+				goto exit;
 
-			memcpy(&m031dev->rx_buffer[count], &buffer[count], len);
+			memcpy(&m031dev->rx_buffer[count], buffer, len);
+
 			count += len;
 			len = 0;
 			flash_addr += len;
@@ -367,7 +372,10 @@ static int firefly_i2c_master_recv(struct m031_data *m031dev, size_t len)
 		kfree(buffer);
 		buffer = NULL;
 	}
-	return (ret == 1) ? count : ret;
+exit:
+	if(buffer)
+		kfree(buffer);
+	return (ret == 1) ? size : ret;
 }
 
 static ssize_t m031_read(struct file *filp, char __user *buf,
@@ -435,7 +443,7 @@ static loff_t m031_llseek(struct file *filp, loff_t offset, int orig)
 	return ret;
 }
 
-static int firefly_i2c_w25x_sector_erase(struct m031_data *m031dev)
+static int firefly_i2c_w25x_sector_erase(struct m031_data *m031dev, unsigned long size)
 {
 	int ret;
 	struct i2c_client *client = m031dev->m031_client;
@@ -443,23 +451,28 @@ static int firefly_i2c_w25x_sector_erase(struct m031_data *m031dev)
 	struct i2c_msg msg;
 	unsigned int flash_addr = m031dev->cur_addr;
 	unsigned char buf[7];
+	int count = (int)size;
 
-	client->adapter->timeout = msecs_to_jiffies(10);
-	buf[0] = erase_flash;
-	buf[1] = (unsigned char)((flash_addr & 0xff0000) >> 16);
-	buf[2] = (unsigned char)((flash_addr & 0xff00) >> 8);
-	buf[3] = (unsigned char)(flash_addr & 0xff);
-	buf[4] = (unsigned char)((W25Q64_SECTOR & 0xff0000) >> 16);
-	buf[5] = (unsigned char)((W25Q64_SECTOR & 0xff00) >> 8);
-	buf[6] = (unsigned char)(W25Q64_SECTOR & 0xff);
+	for ( ; count > 0; count -= W25Q64_SECTOR) {
+		buf[0] = erase_flash;
+		buf[1] = (unsigned char)((flash_addr & 0xff0000) >> 16);
+		buf[2] = (unsigned char)((flash_addr & 0xff00) >> 8);
+		buf[3] = (unsigned char)(flash_addr & 0xff);
+		buf[4] = (unsigned char)((W25Q64_SECTOR & 0xff0000) >> 16);
+		buf[5] = (unsigned char)((W25Q64_SECTOR & 0xff00) >> 8);
+		buf[6] = (unsigned char)(W25Q64_SECTOR & 0xff);
 
-	msg.addr = client->addr;
-	msg.flags = client->flags & I2C_M_TEN;
-	msg.len = sizeof(buf);
-	msg.buf = buf;
-	ret = i2c_transfer(adap, &msg, 1);
-	if (ret == 1)
-		dev_dbg(&client->dev, "transmit: %ld byte\n", ARRAY_SIZE(buf));
+		msg.addr = client->addr;
+		msg.flags = client->flags & I2C_M_TEN;
+		msg.len = sizeof(buf);
+		msg.buf = buf;
+		ret = i2c_transfer(adap, &msg, 1);
+		if (ret == 1)
+			dev_dbg(&client->dev, "4 KB block erase...");
+		flash_addr += W25Q64_SECTOR;
+		if (!firefly_wait_flash_ready(m031dev))
+			dev_dbg(&client->dev, "OK\n");
+	}
 
 	return ret;
 }
@@ -473,7 +486,7 @@ static int firefly_i2c_w25x_32kb_block_erase(struct m031_data *m031dev)
 	unsigned int flash_addr = m031dev->cur_addr;
 	unsigned char buf[7];
 
-	client->adapter->timeout = msecs_to_jiffies(20);
+	firefly_wait_flash_ready(m031dev);
 	buf[0] = erase_flash;
 	buf[1] = (unsigned char)((flash_addr & 0xff0000) >> 16);
 	buf[2] = (unsigned char)((flash_addr & 0xff00) >> 8);
@@ -488,7 +501,7 @@ static int firefly_i2c_w25x_32kb_block_erase(struct m031_data *m031dev)
 	msg.buf = buf;
 	ret = i2c_transfer(adap, &msg, 1);
 	if (ret == 1)
-		dev_dbg(&client->dev, "transmit: %ld byte\n", ARRAY_SIZE(buf));
+		dev_dbg(&client->dev, "32 KB block erase\n");
 
 	return ret;
 }
@@ -502,7 +515,7 @@ static int firefly_i2c_w25x_64kb_block_erase(struct m031_data *m031dev)
 	unsigned int flash_addr = m031dev->cur_addr;
 	unsigned char buf[7];
 
-	client->adapter->timeout = msecs_to_jiffies(30);
+	firefly_wait_flash_ready(m031dev);
 	buf[0] = erase_flash;
 	buf[1] = (unsigned char)((flash_addr & 0xff0000) >> 16);
 	buf[2] = (unsigned char)((flash_addr & 0xff00) >> 8);
@@ -517,7 +530,7 @@ static int firefly_i2c_w25x_64kb_block_erase(struct m031_data *m031dev)
 	msg.buf = buf;
 	ret = i2c_transfer(adap, &msg, 1);
 	if (ret == 1)
-		dev_dbg(&client->dev, "transmit: %ld byte\n", ARRAY_SIZE(buf));
+		dev_dbg(&client->dev, "64 KB block erase\n");
 
 	return ret;
 }
@@ -531,8 +544,7 @@ static int firefly_i2c_w25x_chip_erase(struct m031_data *m031dev)
 	unsigned int flash_addr = m031dev->cur_addr;
 	unsigned char buf[7];
 
-	client->adapter->timeout = msecs_to_jiffies(30000);
-
+	firefly_wait_flash_ready(m031dev);
 	buf[0] = erase_flash;
 	buf[1] = (unsigned char)((flash_addr & 0xff0000) >> 16);
 	buf[2] = (unsigned char)((flash_addr & 0xff00) >> 8);
@@ -547,7 +559,7 @@ static int firefly_i2c_w25x_chip_erase(struct m031_data *m031dev)
 	msg.buf = buf;
 	ret = i2c_transfer(adap, &msg, 1);
 	if (ret == 1)
-		dev_dbg(&client->dev, "transmit: %ld byte\n", ARRAY_SIZE(buf));
+		dev_dbg(&client->dev, "chip erase\n");
 
 	return ret;
 }
@@ -579,7 +591,7 @@ static long m031_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	/* read requests */
 	case W25Q64_IOC_SECTOR_ERASE:
-		retval = firefly_i2c_w25x_sector_erase(m031dev);
+		retval = firefly_i2c_w25x_sector_erase(m031dev, arg);
 		break;
 	case W25Q64_IOC_32KB_BLOCK_ERASE:
 		retval = firefly_i2c_w25x_32kb_block_erase(m031dev);
@@ -639,6 +651,8 @@ static int m031_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		WARN_ON(client->dev.of_node &&
 			!of_match_device(m031_ids, &client->dev));
 	}
+
+	client->adapter->timeout = msecs_to_jiffies(50);
 
 	/* Allocate driver data */
 	m031dev = kzalloc(sizeof(*m031dev), GFP_KERNEL);
