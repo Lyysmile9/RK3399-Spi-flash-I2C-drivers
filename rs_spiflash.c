@@ -7,32 +7,66 @@
 #include <sys/ioctl.h>
 #include <linux/types.h>
 #include <time.h>
+#include <pthread.h>
 #include <openssl/md5.h>
 #include "w25q64.h"
 #include "rs_spiflash.h"
 
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
 static const char *device = "/dev/w25q64";
+static FLASH_INFO flashinfo = {
+		.flashtype = {'w', '2', '5', '\0'},
+		.config_star = 8192,
+		.data_start = 12288,
+};
+static pthread_mutex_t mutex;
 
 static int rs_get_flash_info(PFLASH_INFO info)
 {
-	int fd, status, i;
-	unsigned char *buf;
-	unsigned int size = sizeof(*info);
+	int status = 0;
 
 	if (!info)
-		return 0;
+		goto exit;
+
+	pthread_mutex_lock(&mutex);
+	status = memcpy(info, &flashinfo, sizeof(flashinfo));
+	pthread_mutex_unlock(&mutex);
+
+exit:
+	return status;
+}
+
+static int rs_set_flash_info(PFLASH_INFO info)
+{
+	int status = 0;
+
+	if (!info)
+		goto exit;
+
+	pthread_mutex_lock(&mutex);
+	status = memcpy( &flashinfo, info, sizeof(flashinfo));
+	pthread_mutex_unlock(&mutex);
+
+exit:
+	return status;
+}
+
+int rs_read_flash_info(	FLASH_INFO info)
+{
+	int fd, i, status = 0;
+	unsigned char *buf = NULL;
+	unsigned int size = sizeof(info);
 
 	fd = open(device, O_RDWR);
 	if (fd < 0) {
 		printf("error can't open %s file\n", device);
-		return 0;
+		goto exit;
 	}
 
-	buf = malloc(sizeof(*info));
+	buf = malloc(sizeof(info));
 	if (!buf) {
 		printf("out of memory\n");
-		return 0;
+		goto exit;;
 	}
 
 	i = 0;
@@ -48,11 +82,12 @@ static int rs_get_flash_info(PFLASH_INFO info)
 		}
 	}
 
-	memcpy((unsigned char *)info, buf, sizeof(*info));
+	memcpy((unsigned char *)&info, buf, sizeof(info));
 
 	close(fd);
 	free(buf);
 
+exit:
 	return status;
 }
 
@@ -101,37 +136,34 @@ static int get_md5(PFLASH_INFO info)
 	return 0;
 }
 
-static int rs_write_flash_info(PFLASH_INFO info)
+int rs_write_flash_info()
 {
-	int fd, status, i; 
-	unsigned char *buf;
-	unsigned int size = sizeof(*info);
-
-	if (!info)
-		return 0;
-
-	info->config_star = W25Q64_SECTOR;
-	info->data_start = 2 * W25Q64_SECTOR;
-	memcpy(info->flashtype, "w25x", sizeof(info->flashtype));
-	get_time(info->date);	 
-	get_md5(info);
+	int fd, i, status = 0;
+	FLASH_INFO info;
+	unsigned char *buf = NULL;
+	unsigned int size = sizeof(info);
 
 	fd = open(device, O_RDWR);
 	if (fd < 0) {
 		printf("error can't open %s file\n", device);
-		return 0;
+		goto exit;
 	}
 
-	buf = malloc(sizeof(*info));
+	buf = malloc(sizeof(info));
 	if (!buf) {
 		printf("out of memory\n");
-		return 0;
+		goto exit;
 	}
 	
 	lseek(fd, 0, SEEK_SET);
-	ioctl(fd, W25Q64_IOC_SECTOR_ERASE, sizeof(*info));
+	ioctl(fd, W25Q64_IOC_SECTOR_ERASE, sizeof(info));
 
-	memcpy(buf, (unsigned char *)info, sizeof(*info));
+	rs_get_flash_info(&info);
+	get_time(info.date);
+	get_md5(&info);
+	rs_set_flash_info(&info);
+
+	memcpy(buf, (unsigned char *)&info, sizeof(info));
 
 	i = 0;
 	while(size > 0) {
@@ -148,7 +180,7 @@ static int rs_write_flash_info(PFLASH_INFO info)
 
 	close(fd);
 	free(buf);
-
+exit:
 	return status;
 }
 
@@ -161,13 +193,13 @@ int rs_dev_id_ops(unsigned char id[4], unsigned int write)
 		goto exit;
 
 	memset(&info, 0, sizeof(FLASH_INFO));
-	status = rs_get_flash_info(&info);
+	rs_get_flash_info(&info);
 
 	if (write) {
 		memcpy(info.device_id, id, sizeof(info.device_id));
-		status = rs_write_flash_info(&info);
+		status = rs_set_flash_info(&info);
 	} else
-		memcpy(id, info.device_id, sizeof(info.device_id));
+		status = memcpy(id, info.device_id, sizeof(info.device_id));
 
 exit:
 	return status;
@@ -182,43 +214,45 @@ int rs_version_ops(unsigned char version[4], unsigned int write)
 		goto exit;
 
 	memset(&info, 0, sizeof(FLASH_INFO));
-	status = rs_get_flash_info(&info);
+	rs_get_flash_info(&info);
 
 	if (write) {
 		memcpy(info.version, version, sizeof(info.version));
-		status = rs_write_flash_info(&info);
+		status = rs_set_flash_info(&info);
 	} else
-		memcpy(version, info.version, sizeof(info.version));
+		status = memcpy(version, info.version, sizeof(info.version));
 
 exit:
 	return status;
 }
 
-int rs_get_commom_config(PCOMMOM_CONFIG cfg)
+int rs_read_common_config(void *outbuf)
 {
-	int fd, status, i, j;
+	int fd, status = 0, i, j;
 	FLASH_INFO info;
-	unsigned char *buf;
-	unsigned int size = sizeof(*cfg);
+	unsigned char *buf = NULL;
+	unsigned int size;
 
-	if (!cfg)
-		return 0;
-
-	if (rs_get_flash_info(&info) < 0) {
-		printf("get flash info failed\n");
-		return 0;
-	}
-
-	buf = malloc(sizeof(*cfg));
-		if (!buf) {
-			printf("out of memory\n");
-			return 0;
-	}
+	if (!outbuf)
+		goto exit;
 
 	fd = open(device, O_RDWR);
 	if (fd < 0) {
 		printf("error can't open %s file\n", device);
-		return 0;
+		goto exit;
+	}
+
+	if (!rs_get_flash_info(&info)) {
+		printf("get flash info failed\n");
+		goto exit;
+	}
+
+	size = info.config_len;
+	printf("read %d common config\n", size);
+	buf = malloc(size);
+	if (!buf) {
+		printf("out of memory\n");
+		goto exit;
 	}
 
 	printf("%s set config start addr:%02x\n", __func__, info.config_star);
@@ -238,35 +272,36 @@ int rs_get_commom_config(PCOMMOM_CONFIG cfg)
 		}
 	}
 
-	memcpy((unsigned char *)(cfg), buf, sizeof(*cfg));
+	memcpy((unsigned char *)outbuf, buf, info.config_len);
 
 	close(fd);
 	free(buf);
-
+	status = info.config_len;
+exit:
 	return status;
 }
 
-int rs_write_commom_config(PCOMMOM_CONFIG cfg)
+int rs_write_common_config(void *data, unsigned int size)
 {
-	int fd, status, i, j;
+	int fd, status = 0, i, j;
 	FLASH_INFO info;
-	unsigned int size = sizeof(*cfg);
 	unsigned char *buf = NULL;
 
-	if (!cfg)
+	if (!data)
 		goto exit;
 
-	if (rs_get_flash_info(&info) < 0) {
+	if (!rs_get_flash_info(&info)) {
 		printf("get flash info failed\n");
 		goto exit;
 	}
 
 	/*update flash info: config len*/
 	info.config_len = size;
-	if (rs_write_flash_info(&info) < 0) {
+	if (!rs_set_flash_info(&info)) {
 		printf("write flash info failed\n");
 		goto exit;
 	}
+	printf("write %d common config\n", size);
 
 	fd = open(device, O_RDWR);
 	if (fd < 0) {
@@ -274,7 +309,7 @@ int rs_write_commom_config(PCOMMOM_CONFIG cfg)
 		goto exit;
 	}
 
-	buf = malloc(sizeof(*cfg));
+	buf = malloc(size);
 	if (!buf) {
 		printf("out of memory\n");
 		goto exit;
@@ -282,9 +317,9 @@ int rs_write_commom_config(PCOMMOM_CONFIG cfg)
 
 	printf("%s set config start addr:%02x\n", __func__, info.config_star);
 	lseek(fd, info.config_star, SEEK_SET);
-	ioctl(fd, W25Q64_IOC_SECTOR_ERASE, sizeof(*cfg));
+	ioctl(fd, W25Q64_IOC_SECTOR_ERASE, size);
 
-	memcpy(buf, (unsigned char *)cfg, sizeof(*cfg));
+	memcpy(buf, (unsigned char *)data, size);
 
 	i = info.config_star;
 	j = 0;
@@ -303,41 +338,41 @@ int rs_write_commom_config(PCOMMOM_CONFIG cfg)
 	close(fd);
 	free(buf);
 
-	return status;
 exit:
-	return 0;
+	return status;
 }
 
 int rs_write_data_to_flash(void *data, unsigned int data_size)
 {
-	int fd, status, i, j;
+	int fd, status = 0, i, j;
 	FLASH_INFO info;
-	unsigned char *buf;
+	unsigned char *buf = NULL;
 
 	if (!data)
 		goto exit;
 
-	if (rs_get_flash_info(&info) < 0) {
+	if (!rs_get_flash_info(&info)) {
 		printf("get flash info failed\n");
 		goto exit;
 	}
 
 	/*update flash info: data len*/
 	info.data_len = data_size;
-	if (rs_write_flash_info(&info) < 0) {
+	if (!rs_set_flash_info(&info)) {
 		printf("write flash info failed\n");
+		goto exit;
+	}
+	printf("write %d data to flash\n", data_size);
+
+	fd = open(device, O_RDWR);
+	if (fd < 0) {
+		printf("error can't open %s file\n", device);
 		goto exit;
 	}
 
 	buf = malloc(data_size);
 	if (!buf) {
 		printf("out of memory\n");
-		goto exit;
-	}
-
-	fd = open(device, O_RDWR);
-	if (fd < 0) {
-		printf("error can't open %s file\n", device);
 		goto exit;
 	}
 
@@ -365,38 +400,40 @@ int rs_write_data_to_flash(void *data, unsigned int data_size)
 	close(fd);
 	free(buf);
 
-	return status;
 exit:
-	return 0;
+	return status;
 }
 
-unsigned int rs_read_data_from_flash(void *data)
+int rs_read_data_from_flash(void *data)
 {
-	int fd,status, i, j;
+	int fd,status = 0, i, j;
 	FLASH_INFO info;
-	unsigned char *buf;
+	unsigned char *buf = NULL;
 	unsigned int size, data_size;
 
 	if (!data)
 		goto exit;
 
-	if (rs_get_flash_info(&info) < 0) {
+	if (!rs_get_flash_info(&info)) {
 		printf("get flash info failed\n");
 		goto exit;
 	}
 
 	size = info.data_len;
 	data_size = size;
+	printf("read %d data from flash\n", size);
+
+	fd = open(device, O_RDWR);
+	if (fd < 0) {
+		printf("error can't open %s file\n", device);
+		goto exit;
+	}
 
 	buf = malloc(data_size);
 	if (!buf) {
 		printf("out of memory\n");
 		goto exit;
 	}
-
-	fd = open(device, O_RDWR);
-	if (fd < 0)
-		printf("error can't open %s file\n", device);
 
 	lseek(fd, info.data_start, SEEK_SET);
 	printf("%s set data start addr:%02x\n", __func__, info.data_start);
@@ -419,113 +456,9 @@ unsigned int rs_read_data_from_flash(void *data)
 	memcpy((unsigned char *)data, buf, size);
 
 	close(fd);
-
-	return size;
+	free(buf);
+	status = info.data_len;
 exit:
-	return 0;
+	return status;
 }
-
-int main(int argc, char **argv)
-{
-	FLASH_INFO info_bak;
-	COMMOM_CONFIG cfg;
-	COMMOM_CONFIG cfg_bak;
-	FILE *file, *file_bak, *head_info;
-	unsigned int file_size;
-	int status = 0;
-	unsigned char *inbuf, *outbuf;
-	unsigned char id[4] = {'w', '2', '5', '\0'};
-	unsigned char id_bak[4];
-	unsigned char ver[4] = {'a', 's', 'd', '\0'};
-	unsigned char ver_bak[4];
-	
-	memset(&cfg_bak, 0, sizeof cfg_bak);
-	memset(&info_bak, 0, sizeof info_bak);
-	memset(id_bak, 0, sizeof(id_bak));
-	memset(ver_bak, 0, sizeof(ver_bak));
-
-	if (rs_dev_id_ops(id, 1) > 0)
-		printf("set dev id:%s\n", id);
-	if (rs_dev_id_ops(id_bak, 0) > 0)
-		printf("device id:%s\n", id_bak);
-
-	rs_version_ops(ver, 1);
-	printf("set ver:%s\n", ver);
-	rs_version_ops(ver_bak, 0);
-	printf("ver:%s\n", ver_bak);
-
-	if (argc < 4) {
-		printf("usage: %s infile outfile head_info_file\n", argv[0]);
-		return 0;
-	}
-
-	file = fopen(argv[1], "r");
-	if (!file) {
-		printf("Error on opening file %s\n", argv[1]);
-	}
-
-	fseek(file, 0, SEEK_END);
-	file_size = ftell(file);
-	printf("file:%s size:%d\n", argv[1], file_size);
-	fseek(file, 0, SEEK_SET);
-
-	inbuf = malloc(file_size);
-	if (!inbuf) {
-		printf("out of memory\n");
-		return 0;
-	}
-
-	outbuf = malloc(file_size);
-	if (!outbuf) {
-		printf("out of memory\n");
-		return 0;
-	}
-
-	fread(outbuf, file_size, 1, file);
-	fclose(file);
-
-	for (unsigned long i = 0; i < ARRAY_SIZE(cfg.reserved); i++)
-		cfg.reserved[i] = i;
-
-	if (rs_write_commom_config(&cfg) > 0)
-		printf("write commom config success\n");
-
-	if (rs_get_commom_config(&cfg_bak) > 0)
-		printf("get commom config success\n");
-
-	for (int i = 0; i < 10; i++)
-		printf("commom config data: %d\n", cfg_bak.reserved[i]);
-
-	if (rs_write_data_to_flash(outbuf, file_size) > 0)
-		printf("write data to flash success\n");
-
-	if (rs_read_data_from_flash(inbuf) == file_size)
-		printf("read data from flash success\n");
-
-	file_bak = fopen(argv[2], "w+");
-	if (!file_bak) {
-		printf("Error on opening file %s\n", argv[2]);
-	}
-
-	fwrite(inbuf, file_size, 1, file_bak);
-	
-	if (rs_get_flash_info(&info_bak) > 0)
-		printf("get flash info success\n");
-	
-	printf("get flash info config start:%x, config len:%x, data start:%x, data len:%x\n",
-		info_bak.config_star, info_bak.config_len, info_bak.data_start, info_bak.data_len);
-	
-	head_info = fopen(argv[3], "w+");
-	if (!head_info) {
-		printf("Error on opening file %s\n", argv[3]);
-	}
-	
-	fwrite(&info_bak, sizeof(info_bak), 1, head_info);
-	fclose(head_info);
-
-	free(inbuf);
-	free(outbuf);
-	fclose(file_bak);
-}
-
 

@@ -13,17 +13,13 @@ typedef struct {
 	unsigned char md5[16];
 }FLASH_INFO, *PFLASH_INFO;
 
-typedef struct {
-	unsigned char reserved[4096];
-}COMMOM_CONFIG, *PCOMMOM_CONFIG;
-
+/*returns a value greater than 0 on success, zero on failure*/
 int rs_dev_id_ops(unsigned char id[4], unsigned int write);
 int rs_version_ops(unsigned char version[4], unsigned int write);
-int rs_get_commom_config(PCOMMOM_CONFIG cfg);
-int rs_write_commom_config(PCOMMOM_CONFIG cfg);
-/*returns a value greater than 0 on success, zero on failure*/
-int rs_write_data_to_flash(void *data, unsigned int data_size);
-/*returns data size on success, zero on failure*/
-unsigned int rs_read_data_from_flash(void *data);
+int rs_read_common_config(void *buf);
+int rs_write_common_config(void *data, unsigned int size);
+int rs_read_data_from_flash(void *buf);
+int rs_write_data_to_flash(void *data, unsigned int size);
+int rs_write_flash_info();
 
 #endif
