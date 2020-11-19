@@ -16,7 +16,7 @@
 static const char *device = "/dev/w25q64";
 static FLASH_INFO flashinfo = {
 		.flashtype = {'w', '2', '5', '\0'},
-		.config_star = 8192,
+		.config_start = 8192,
 		.data_start = 12288,
 };
 static pthread_mutex_t mutex;
@@ -51,10 +51,11 @@ exit:
 	return status;
 }
 
-int rs_read_flash_info(	FLASH_INFO info)
+int rs_read_flash_info()
 {
 	int fd, i, status = 0;
 	unsigned char *buf = NULL;
+	FLASH_INFO info;
 	unsigned int size = sizeof(info);
 
 	fd = open(device, O_RDWR);
@@ -83,6 +84,8 @@ int rs_read_flash_info(	FLASH_INFO info)
 	}
 
 	memcpy((unsigned char *)&info, buf, sizeof(info));
+
+	rs_set_flash_info(&info);
 
 	close(fd);
 	free(buf);
@@ -255,9 +258,9 @@ int rs_read_common_config(void *outbuf)
 		goto exit;
 	}
 
-	printf("%s set config start addr:%02x\n", __func__, info.config_star);
+	printf("%s set config start addr:%02x\n", __func__, info.config_start);
 	
-	i = info.config_star;
+	i = info.config_start;
 	j = 0;
 	while (size > 0) {
 		lseek(fd, i, SEEK_SET);
@@ -315,13 +318,13 @@ int rs_write_common_config(void *data, unsigned int size)
 		goto exit;
 	}
 
-	printf("%s set config start addr:%02x\n", __func__, info.config_star);
-	lseek(fd, info.config_star, SEEK_SET);
+	printf("%s set config start addr:%02x\n", __func__, info.config_start);
+	lseek(fd, info.config_start, SEEK_SET);
 	ioctl(fd, W25Q64_IOC_SECTOR_ERASE, size);
 
 	memcpy(buf, (unsigned char *)data, size);
 
-	i = info.config_star;
+	i = info.config_start;
 	j = 0;
 	while(size > 0) {
 		lseek(fd, i, SEEK_SET);
@@ -458,6 +461,40 @@ int rs_read_data_from_flash(void *data)
 	close(fd);
 	free(buf);
 	status = info.data_len;
+exit:
+	return status;
+}
+
+int rs_get_config_len()
+{
+	int status = 0;
+	FLASH_INFO info;
+
+	if(!rs_read_flash_info())
+		goto exit;
+
+	if(!rs_get_flash_info(&info))
+		goto exit;
+
+	status = info.config_len;
+
+exit:
+	return status;
+}
+
+int rs_get_data_len()
+{
+	int status = 0;
+	FLASH_INFO info;
+
+	if(!rs_read_flash_info())
+		goto exit;
+
+	if(!rs_get_flash_info(&info))
+		goto exit;
+
+	status = info.data_len;
+
 exit:
 	return status;
 }
