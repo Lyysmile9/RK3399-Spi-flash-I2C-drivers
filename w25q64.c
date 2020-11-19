@@ -1,20 +1,3 @@
-/*
- * Simple synchronous userspace interface to SPI devices
- *
- * Copyright (C) 2006 SWAPP
- *	Andrea Paterniani <a.paterniani@swapp-eng.it>
- * Copyright (C) 2007 David Brownell (simplification, cleanup)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- */
 #define DEBUG
 #include <linux/init.h>
 #include <linux/module.h>
@@ -51,7 +34,7 @@
  * nodes, since there is no fixed association of minor numbers with any
  * particular SPI bus or device.
  */
-#define SPIDEV_MAJOR			153	/* assigned */
+#define SPIDEV_MAJOR			155	/* assigned */
 #define N_SPI_MINORS			32	/* ... up to 256 */
 
 /*W25Q64 CMD*/
@@ -112,7 +95,7 @@ MODULE_PARM_DESC(bufsiz, "data bytes in biggest supported SPI message");
 
 /*-------------------------------------------------------------------------*/
 
-static char firefly_spi_w25x_status(struct spi_device *spi)
+static char rs_spi_w25x_status(struct spi_device *spi)
 {       
 	int     status;
 	char tbuf[]={READ_STATUS_REG};
@@ -136,12 +119,12 @@ static char firefly_spi_w25x_status(struct spi_device *spi)
 	return rbuf[0];
 }
 
-static int firefly_spi_w25x_wait_ready(struct spi_device *spi )
+static int rs_spi_w25x_wait_ready(struct spi_device *spi )
 {
 	char retval = 1;
 	dev_dbg(&spi->dev, "wait ready...");
 	do {
-		retval = firefly_spi_w25x_status(spi);
+		retval = rs_spi_w25x_status(spi);
 		retval &= 0xff;
 		retval &= 1;
 	}while(retval != 0);
@@ -149,7 +132,7 @@ static int firefly_spi_w25x_wait_ready(struct spi_device *spi )
 	return 0;
 }
 
-static int firefly_spi_w25x_write_enable(struct spi_device *spi)
+static int rs_spi_w25x_write_enable(struct spi_device *spi)
 {       
 	int     status;
 	char cmd_buf[1] = {WRITE_ENABLE};
@@ -170,7 +153,7 @@ static int firefly_spi_w25x_write_enable(struct spi_device *spi)
 	return status;
 }
 
-static int firefly_spi_read_w25x_id_0(struct spi_device *spi)
+static int rs_spi_read_w25x_id_0(struct spi_device *spi)
 {       
 	int     status;
 	char tbuf[]={READ_UID};
@@ -198,7 +181,7 @@ static int firefly_spi_read_w25x_id_0(struct spi_device *spi)
 }
 
 static int
-firefly_spi_w25x_sector_erase(struct spidev_data *spidev, unsigned long size)
+rs_spi_w25x_sector_erase(struct spidev_data *spidev, unsigned long size)
 {
 	int status;
 	char cmd[4] = {SECTOR_ERASE};
@@ -216,12 +199,12 @@ firefly_spi_w25x_sector_erase(struct spidev_data *spidev, unsigned long size)
 		cmd[2] = (unsigned char)((flash_addr & 0xff00) >> 8);
 		cmd[3] = (unsigned char)(flash_addr & 0xff);
 
-		firefly_spi_w25x_write_enable(spi);
+		rs_spi_w25x_write_enable(spi);
 
 		spi_message_init(&m);
 		spi_message_add_tail(&t, &m);
 		status = spi_sync(spi, &m);
-		firefly_spi_w25x_wait_ready(spi);
+		rs_spi_w25x_wait_ready(spi);
 		dev_dbg(&spi->dev,"start addr: %x, sector erase OK\n", flash_addr);
 		flash_addr += W25Q64_SECTOR;
 	}
@@ -229,7 +212,7 @@ firefly_spi_w25x_sector_erase(struct spidev_data *spidev, unsigned long size)
 }
 
 static int
-firefly_spi_w25x_32kb_block_erase(struct spidev_data *spidev)
+rs_spi_w25x_32kb_block_erase(struct spidev_data *spidev)
 {
 	int status;
 	char cmd[4] = {BLOCK_32KB_ERASE};
@@ -244,18 +227,18 @@ firefly_spi_w25x_32kb_block_erase(struct spidev_data *spidev)
 	cmd[2] = (unsigned char)((spidev->cur_addr & 0xff00) >> 8);
 	cmd[3] = (unsigned char)(spidev->cur_addr & 0xff);
 
-	firefly_spi_w25x_write_enable(spi);
+	rs_spi_w25x_write_enable(spi);
 
 	spi_message_init(&m);
 	spi_message_add_tail(&t, &m);
 	status = spi_sync(spi, &m);
-	firefly_spi_w25x_wait_ready(spi);
+	rs_spi_w25x_wait_ready(spi);
 	dev_dbg(&spi->dev,"32kb block erase OK\n");
 	return status;
 }
 
 static int
-firefly_spi_w25x_64kb_block_erase(struct spidev_data *spidev)
+rs_spi_w25x_64kb_block_erase(struct spidev_data *spidev)
 {
 	int status;
 	char cmd[4] = {BLOCK_64KB_ERASE};
@@ -270,17 +253,17 @@ firefly_spi_w25x_64kb_block_erase(struct spidev_data *spidev)
 	cmd[2] = (unsigned char)((spidev->cur_addr & 0xff00) >> 8);
 	cmd[3] = (unsigned char)(spidev->cur_addr & 0xff);
 
-	firefly_spi_w25x_write_enable(spi);
+	rs_spi_w25x_write_enable(spi);
 
 	spi_message_init(&m);
 	spi_message_add_tail(&t, &m);
 	status = spi_sync(spi, &m);
-	firefly_spi_w25x_wait_ready(spi);
+	rs_spi_w25x_wait_ready(spi);
 	dev_dbg(&spi->dev,"64kb block erase OK\n");
 	return status;
 }
 
-static int firefly_spi_w25x_chip_erase(struct spi_device *spi)
+static int rs_spi_w25x_chip_erase(struct spi_device *spi)
 {
 	int status;
 	char chip_erase[1] = {CHIP_ERASE};
@@ -291,18 +274,18 @@ static int firefly_spi_w25x_chip_erase(struct spi_device *spi)
 	};
 	struct spi_message m;
 
-	firefly_spi_w25x_write_enable(spi);
+	rs_spi_w25x_write_enable(spi);
 
 	spi_message_init(&m);
 	spi_message_add_tail(&erase, &m);
 	status = spi_sync(spi, &m);
-	firefly_spi_w25x_wait_ready(spi);
+	rs_spi_w25x_wait_ready(spi);
 	dev_dbg(&spi->dev,"chip erase OK\n");
 	return status;
 }
 
 static loff_t
-firefly_spi_w25x_llseek(struct file *filp, loff_t offset, int orig)
+rs_spi_w25x_llseek(struct file *filp, loff_t offset, int orig)
 {
 	loff_t ret = 0;
 	struct spidev_data	*spidev;
@@ -391,14 +374,14 @@ spidev_sync_write(struct spidev_data *spidev, size_t len)
 	addr[1] = (unsigned char)((spidev->cur_addr & 0xff00) >> 8);
 	addr[2] = (unsigned char)(spidev->cur_addr & 0xff);
 
-	firefly_spi_w25x_write_enable(spidev->spi);
+	rs_spi_w25x_write_enable(spidev->spi);
 
 	spi_message_init(&m);
 	spi_message_add_tail(&c[0], &m);
 	spi_message_add_tail(&c[1], &m);
 	spi_message_add_tail(&t, &m);
 	status = spidev_sync(spidev, &m);
-	firefly_spi_w25x_wait_ready(spidev->spi);
+	rs_spi_w25x_wait_ready(spidev->spi);
 	return status;
 }
 
@@ -435,7 +418,7 @@ spidev_sync_read(struct spidev_data *spidev, size_t len)
 	spi_message_add_tail(&t[1], &m);
 	spi_message_add_tail(&t[2], &m);
 	status = spidev_sync(spidev, &m);
-	firefly_spi_w25x_wait_ready(spidev->spi);
+	rs_spi_w25x_wait_ready(spidev->spi);
 	return status;
 }
 
@@ -544,16 +527,16 @@ spidev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	/* read requests */
 	case W25Q64_IOC_SECTOR_ERASE:
-		retval = firefly_spi_w25x_sector_erase(spidev, arg);
+		retval = rs_spi_w25x_sector_erase(spidev, arg);
 		break;
 	case W25Q64_IOC_32KB_BLOCK_ERASE:
-		retval = firefly_spi_w25x_32kb_block_erase(spidev);
+		retval = rs_spi_w25x_32kb_block_erase(spidev);
 		break;
 	case W25Q64_IOC_64KB_BLOCK_ERASE:
-		retval = firefly_spi_w25x_64kb_block_erase(spidev);
+		retval = rs_spi_w25x_64kb_block_erase(spidev);
 		break;
 	case W25Q64_IOC_CHIP_ERASE:
-		retval = firefly_spi_w25x_chip_erase(spi);
+		retval = rs_spi_w25x_chip_erase(spi);
 		break;
 	case SPI_IOC_RD_MODE:
 		retval = __put_user(spi->mode & SPI_MODE_MASK,
@@ -760,7 +743,7 @@ static const struct file_operations spidev_fops = {
 	.compat_ioctl = spidev_compat_ioctl,
 	.open =		spidev_open,
 	.release =	spidev_release,
-	.llseek =	firefly_spi_w25x_llseek,
+	.llseek =	rs_spi_w25x_llseek,
 };
 
 /*-------------------------------------------------------------------------*/
@@ -849,7 +832,7 @@ static int spidev_probe(struct spi_device *spi)
 	gpio_direction_output(spidev->wp_gpio, 0);
 	gpio_export(spidev->wp_gpio, 0);
 	
-	firefly_spi_read_w25x_id_0(spi);
+	rs_spi_read_w25x_id_0(spi);
 
 	return status;
 }
