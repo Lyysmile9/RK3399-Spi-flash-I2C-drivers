@@ -825,9 +825,17 @@ static int spidev_probe(struct spi_device *spi)
 		kfree(spidev);
 
 	spidev->wp_gpio = of_get_named_gpio(np, "wp-gpio", 0);
+	if (!gpio_is_valid(spidev->wp_gpio)) {
+        dev_err(&spi->dev, "wp-gpio: %d is invalid\n", spidev->wp_gpio);
+        return -ENODEV;
+    }
+
 	status = gpio_request(spidev->wp_gpio, "wp-gpio");
-	if (status)
-		return -ENODEV;
+	if (status) {
+        dev_err(&spi->dev, "wp-gpio: %d request failed!\n", spidev->wp_gpio);
+        gpio_free(spidev->wp_gpio);
+        return -ENODEV;
+    }
 
 	gpio_direction_output(spidev->wp_gpio, 0);
 	gpio_export(spidev->wp_gpio, 0);
