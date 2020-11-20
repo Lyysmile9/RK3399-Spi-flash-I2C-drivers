@@ -20,6 +20,7 @@ static FLASH_INFO flashinfo = {
 		.data_start = 12288,
 };
 static pthread_mutex_t mutex;
+static get_md5(PFLASH_INFO info);
 
 static int rs_get_flash_info(PFLASH_INFO info)
 {
@@ -86,6 +87,8 @@ int rs_read_flash_info()
 	memcpy((unsigned char *)&info, buf, sizeof(info));
 
 	rs_set_flash_info(&info);
+
+	get_md5(&info);
 
 	close(fd);
 	free(buf);

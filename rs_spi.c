@@ -83,6 +83,11 @@ int main(int argc, char **argv)
 		for (int i = 0; i < rs_get_config_len(); i++ )
 			printf("config[%d]:%d\n", i, config_bak[i]);
 	}
+
+	if (!rs_read_flash_info()) {
+		printf("read flash info failure\n");
+		goto exit;
+	}
 exit:
 	if (outbuf)
 		free(outbuf);
