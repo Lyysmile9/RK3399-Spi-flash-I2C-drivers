@@ -12,7 +12,18 @@
 #include "w25q64.h"
 #include "rs_spiflash.h"
 
-#define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
+typedef struct {
+	unsigned char device_id[4];
+	unsigned char version[4];
+	unsigned char flashtype[4];
+	unsigned char date[6];
+	unsigned int config_start;
+	unsigned int config_len;
+	unsigned int data_start;
+	unsigned int data_len;
+	unsigned char md5[16];
+}FLASH_INFO, *PFLASH_INFO;
+
 static const char *device = "/dev/w25q64";
 static FLASH_INFO flashinfo = {
 		.flashtype = {'w', '2', '5', '\0'},
@@ -20,7 +31,9 @@ static FLASH_INFO flashinfo = {
 		.data_start = 12288,
 };
 static pthread_mutex_t mutex;
-static get_md5(PFLASH_INFO info);
+static int flashinfo_init = 0;
+static int get_md5(PFLASH_INFO info);
+static int rs_read_flash_info();
 
 static int rs_get_flash_info(PFLASH_INFO info)
 {
@@ -29,8 +42,16 @@ static int rs_get_flash_info(PFLASH_INFO info)
 	if (!info)
 		goto exit;
 
+	if (!flashinfo_init) {
+		if (!rs_read_flash_info()) {
+			printf("read flash info failure\n");
+			goto exit;
+		}
+		flashinfo_init = 1;
+	}
+
 	pthread_mutex_lock(&mutex);
-	status = memcpy(info, &flashinfo, sizeof(flashinfo));
+	status = memcpy(info, &flashinfo, sizeof(*info));
 	pthread_mutex_unlock(&mutex);
 
 exit:
@@ -45,14 +66,19 @@ static int rs_set_flash_info(PFLASH_INFO info)
 		goto exit;
 
 	pthread_mutex_lock(&mutex);
-	status = memcpy( &flashinfo, info, sizeof(flashinfo));
+	flashinfo.config_len = info->config_len;
+	flashinfo.data_len = info->data_len;
+	memcpy(&flashinfo.device_id, &info->device_id, sizeof(flashinfo.device_id));
+	memcpy(&flashinfo.version, &info->version, sizeof(flashinfo.version));
+	memcpy(&flashinfo.date, &info->date, sizeof(flashinfo.date));
+	memcpy(&flashinfo.md5, &info->md5, sizeof(flashinfo.md5));
 	pthread_mutex_unlock(&mutex);
-
+	status = 1;
 exit:
 	return status;
 }
 
-int rs_read_flash_info()
+static int rs_read_flash_info()
 {
 	int fd, i, status = 0;
 	unsigned char *buf = NULL;
@@ -88,7 +114,7 @@ int rs_read_flash_info()
 
 	rs_set_flash_info(&info);
 
-	get_md5(&info);
+//	get_md5(&info);
 
 	close(fd);
 	free(buf);
@@ -142,7 +168,7 @@ static int get_md5(PFLASH_INFO info)
 	return 0;
 }
 
-int rs_write_flash_info()
+static int rs_write_flash_info()
 {
 	int fd, i, status = 0;
 	FLASH_INFO info;
@@ -165,6 +191,7 @@ int rs_write_flash_info()
 	ioctl(fd, W25Q64_IOC_SECTOR_ERASE, sizeof(info));
 
 	rs_get_flash_info(&info);
+
 	get_time(info.date);
 	get_md5(&info);
 	rs_set_flash_info(&info);
@@ -203,7 +230,8 @@ int rs_dev_id_ops(unsigned char id[4], unsigned int write)
 
 	if (write) {
 		memcpy(info.device_id, id, sizeof(info.device_id));
-		status = rs_set_flash_info(&info);
+		rs_set_flash_info(&info);
+		status = rs_write_flash_info();
 	} else
 		status = memcpy(id, info.device_id, sizeof(info.device_id));
 
@@ -224,7 +252,8 @@ int rs_version_ops(unsigned char version[4], unsigned int write)
 
 	if (write) {
 		memcpy(info.version, version, sizeof(info.version));
-		status = rs_set_flash_info(&info);
+		rs_set_flash_info(&info);
+		status = rs_write_flash_info();
 	} else
 		status = memcpy(version, info.version, sizeof(info.version));
 
@@ -304,7 +333,7 @@ int rs_write_common_config(void *data, unsigned int size)
 	/*update flash info: config len*/
 	info.config_len = size;
 	if (!rs_set_flash_info(&info)) {
-		printf("write flash info failed\n");
+		printf("set flash info failed\n");
 		goto exit;
 	}
 	printf("write %d common config\n", size);
@@ -343,7 +372,7 @@ int rs_write_common_config(void *data, unsigned int size)
 	}
 	close(fd);
 	free(buf);
-
+	status = rs_write_flash_info();
 exit:
 	return status;
 }
@@ -405,7 +434,7 @@ int rs_write_data_to_flash(void *data, unsigned int data_size)
 
 	close(fd);
 	free(buf);
-
+	status = rs_write_flash_info();
 exit:
 	return status;
 }
@@ -473,9 +502,6 @@ int rs_get_config_len()
 	int status = 0;
 	FLASH_INFO info;
 
-	if(!rs_read_flash_info())
-		goto exit;
-
 	if(!rs_get_flash_info(&info))
 		goto exit;
 
@@ -489,9 +515,6 @@ int rs_get_data_len()
 {
 	int status = 0;
 	FLASH_INFO info;
-
-	if(!rs_read_flash_info())
-		goto exit;
 
 	if(!rs_get_flash_info(&info))
 		goto exit;

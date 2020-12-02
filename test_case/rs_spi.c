@@ -42,11 +42,7 @@ int main(int argc, char **argv)
 		printf("out of memory\n");
 		goto exit;
 	}
-	outbuf = malloc(infile_size);
-	if (!outbuf) {
-		printf("out of memory\n");
-		goto exit;
-	}
+
 	fread(inbuf, infile_size, 1, infile);
 
 	if(!rs_dev_id_ops(id, 1))
@@ -65,13 +61,20 @@ int main(int argc, char **argv)
 		goto exit;
 	}
 
-	if (!rs_read_data_from_flash(outbuf)) {
-		printf("read data from flash failure\n");
+	if (infile_size != rs_get_data_len() || 256 != rs_get_config_len() ) {
+		printf("flash info error, data len: %d, config len: %d\n",
+			rs_get_data_len(), rs_get_config_len());
 		goto exit;
 	}
 
-	if (!rs_write_flash_info()) {
-		printf("write flash info failure\n");
+	outbuf = malloc(infile_size);
+	if (!outbuf) {
+		printf("out of memory\n");
+		goto exit;
+	}
+
+	if (!rs_read_data_from_flash(outbuf)) {
+		printf("read data from flash failure\n");
 		goto exit;
 	}
 
@@ -84,10 +87,6 @@ int main(int argc, char **argv)
 			printf("config[%d]:%d\n", i, config_bak[i]);
 	}
 
-	if (!rs_read_flash_info()) {
-		printf("read flash info failure\n");
-		goto exit;
-	}
 exit:
 	if (outbuf)
 		free(outbuf);
