@@ -15,6 +15,7 @@
 #include <linux/kernel.h>
 #include <linux/i2c.h>
 #include <linux/uaccess.h>
+#include <linux/delay.h>
 #include "w25q64.h"
 
 #define M031_MAJOR			154
@@ -25,7 +26,9 @@ static unsigned int bufsiz = 4096;
 
 typedef enum {
 		self_test = 0x0c,
+		mcu_wakeup = 0x10,
 		get_status = 0x20,
+		mcu_sleep = 0x30,
         erase_flash = 0x40,
         write_flash = 0x80,
         read_flash = 0xff,
@@ -48,6 +51,75 @@ struct m031_data {
 static LIST_HEAD(device_list);
 static DEFINE_MUTEX(device_list_lock);
 
+static int wakeup_mcu(struct m031_data *m031dev)
+{
+	int ret, retry = 0;
+	struct i2c_client *client = m031dev->m031_client;
+	struct i2c_adapter *adap = client->adapter;
+	struct i2c_msg msg[2];
+	unsigned char cmd;
+	unsigned char val;
+
+retry:
+	cmd = mcu_wakeup;
+	msg[0].addr = client->addr;
+	msg[0].flags = client->flags;
+	msg[0].len = 1;
+	msg[0].buf = &cmd;
+	ret = i2c_transfer(adap, &msg[0], 1);
+	if (ret == 1)
+		dev_dbg(&client->dev, "wakeup mcu...\n");
+	else
+		goto exit;
+
+	msg[1].addr = client->addr;
+	msg[1].flags = client->flags | I2C_M_RD;
+	msg[1].len = 1;
+	msg[1].buf = &val;
+	ret = i2c_transfer(adap, &msg[1], 1);
+	if (ret == 1) {
+		if (val == mcu_wakeup)
+			dev_dbg(&client->dev, "wake success\n");
+		else {
+			dev_dbg(&client->dev, "val:%x\n", val);
+			if (retry > 5) {
+				ret = -1;
+				goto exit;
+			}
+			retry++;
+			goto retry;
+		}
+	} else
+		goto exit;
+
+exit:
+	return ret;
+}
+
+static int mcu_power_down(struct m031_data *m031dev)
+{
+	int ret;
+	struct i2c_client *client = m031dev->m031_client;
+	struct i2c_adapter *adap = client->adapter;
+	struct i2c_msg msg;
+	unsigned char cmd;
+
+	cmd = mcu_sleep;
+	msg.addr = client->addr;
+	msg.flags = client->flags;
+	msg.len = 1;
+	msg.buf = &cmd;
+	ret = i2c_transfer(adap, &msg, 1);
+	if (ret == 1)
+		dev_dbg(&client->dev, "mcu sleep...\n");
+	else {
+		dev_err(&client->dev, "i2c tranfer error\n");
+		goto exit;
+	}
+exit:
+	return ret;
+}
+
 static int m031_open(struct inode *inode, struct file *filp)
 {
 	struct m031_data	*m031dev;
@@ -62,6 +134,11 @@ static int m031_open(struct inode *inode, struct file *filp)
 		}
 	}
 
+	if (wakeup_mcu(m031dev) < 0) {
+		dev_err(&m031dev->m031_client->dev, "wakeup mcu failed\n");
+		goto err_find_dev;
+	}
+	
 	if (status) {
 		pr_debug("m031dev: nothing for minor %d\n", iminor(inode));
 		goto err_find_dev;
@@ -70,7 +147,7 @@ static int m031_open(struct inode *inode, struct file *filp)
 	if (!m031dev->tx_buffer) {
 		m031dev->tx_buffer = kmalloc(bufsiz, GFP_KERNEL);
 		if (!m031dev->tx_buffer) {
-			dev_dbg(&m031dev->m031_client->dev, "open/ENOMEM\n");
+			dev_err(&m031dev->m031_client->dev, "open/ENOMEM\n");
 			status = -ENOMEM;
 			goto err_find_dev;
 		}
@@ -79,7 +156,7 @@ static int m031_open(struct inode *inode, struct file *filp)
 	if (!m031dev->rx_buffer) {
 		m031dev->rx_buffer = kmalloc(bufsiz, GFP_KERNEL);
 		if (!m031dev->rx_buffer) {
-			dev_dbg(&m031dev->m031_client->dev, "open/ENOMEM\n");
+			dev_err(&m031dev->m031_client->dev, "open/ENOMEM\n");
 			status = -ENOMEM;
 			goto err_alloc_rx_buf;
 		}
@@ -118,6 +195,7 @@ static int m031_release(struct inode *inode, struct file *filp)
 		kfree(m031dev->rx_buffer);
 		m031dev->rx_buffer = NULL;
 
+		mcu_power_down(m031dev);
 		spin_lock_irq(&m031dev->m031_lock);
 		/* ... after we unbound from the underlying device? */
 		dofree = (m031dev->m031_client == NULL);
@@ -134,15 +212,16 @@ static int m031_release(struct inode *inode, struct file *filp)
 static int rs_self_testing(struct i2c_client *client)
 {
 	int ret;
-	unsigned char buf;
+	unsigned char cmd;
+	unsigned char val;
 	struct i2c_adapter *adap = client->adapter;
 	struct i2c_msg msg[2];
 
-	buf = self_test;
+	cmd = self_test;
 	msg[0].addr = client->addr;
 	msg[0].flags = client->flags & I2C_M_TEN;
 	msg[0].len = 1;
-	msg[0].buf = &buf;
+	msg[0].buf = &cmd;
 	ret = i2c_transfer(adap, &msg[0], 1);
 	if (ret == 1)
 		dev_dbg(&client->dev, "self testing:\n");
@@ -150,16 +229,16 @@ static int rs_self_testing(struct i2c_client *client)
 		goto exit;
 
 	msg[1].addr = client->addr;
-	msg[1].flags = client->flags & I2C_M_TEN;
+	msg[1].flags = client->flags & I2C_M_RD;
 	msg[1].len = 1;
-	msg[1].buf = &buf;
-	ret = i2c_transfer(adap, &msg[0], 1);
+	msg[1].buf = &val;
+	ret = i2c_transfer(adap, &msg[1], 1);
 	if (ret == 1)
-		dev_dbg(&client->dev, "%x OK\n", buf);
+		dev_dbg(&client->dev, "%x OK\n", val);
 	else
 		goto exit;
 exit:
-	return 0;
+	return ret;
 }
 
 static unsigned char rs_i2c_get_flash_status(struct m031_data *m031dev)
@@ -168,17 +247,19 @@ static unsigned char rs_i2c_get_flash_status(struct m031_data *m031dev)
 	struct i2c_client *client = m031dev->m031_client;
 	struct i2c_adapter *adap = client->adapter;
 	struct i2c_msg msg[2];
-	unsigned char buf[7] = {0};
-	unsigned char status;
+	unsigned char buf;
+	unsigned char status = -1;
 
-	buf[0] = get_status;
+	buf = get_status;
 	msg[0].addr = client->addr;
 	msg[0].flags = client->flags & I2C_M_TEN;
-	msg[0].len = ARRAY_SIZE(buf);
-	msg[0].buf = buf;
+	msg[0].len = 1;
+	msg[0].buf = &buf;
 	ret = i2c_transfer(adap, &msg[0], 1);
 	if (ret == 1)
 		dev_dbg(&client->dev, "get flash status\n");
+	else
+		goto exit;
 
 	msg[1].addr = client->addr;
 	msg[1].flags = client->flags | I2C_M_RD;
@@ -187,8 +268,11 @@ static unsigned char rs_i2c_get_flash_status(struct m031_data *m031dev)
 	ret = i2c_transfer(adap, &msg[1], 1);
 	if (ret == 1)
 		dev_dbg(&client->dev, "read flash status\n");
-	
+	else
+		goto exit;
 	return status;
+exit:	
+	return ret;
 }
 
 static int rs_wait_flash_ready(struct m031_data *m031dev)
@@ -196,13 +280,20 @@ static int rs_wait_flash_ready(struct m031_data *m031dev)
 	unsigned char ret = 1;
 	do {
 		ret = rs_i2c_get_flash_status(m031dev);
+		mdelay(1);
+		if (ret < 0) {
+			dev_err(&m031dev->m031_client->dev, "get status error\n");
+			goto exit;
+		}
 	}while (ret != 0);
-
+		
+exit:
 	return ret;
 }
+
 static int rs_i2c_master_send(struct m031_data *m031dev, size_t len)
 {
-	int ret;
+	int ret = 0;
 	struct i2c_client *client = m031dev->m031_client;
 	struct i2c_adapter *adap = client->adapter;
 	struct i2c_msg msg;
@@ -212,8 +303,9 @@ static int rs_i2c_master_send(struct m031_data *m031dev, size_t len)
 	unsigned int flash_addr = m031dev->cur_addr;
 
 	while (len > 0) {
-		printk("send len:%ld\n", len);
-		rs_wait_flash_ready(m031dev);
+		ret = rs_wait_flash_ready(m031dev);
+		if (ret < 0)
+			goto exit;
 		if (len > W25Q64_PAGE_LENGTH) {
 			buffer = kzalloc(W25Q64_PAGE_LENGTH + 7, GFP_KERNEL);
 			if (!buffer)
@@ -235,7 +327,7 @@ static int rs_i2c_master_send(struct m031_data *m031dev, size_t len)
 			msg.buf = buffer;
 			ret = i2c_transfer(adap, &msg, 1);
 			if (ret == 1)
-				dev_dbg(&client->dev, "transmit: 256 byte\n");
+				dev_dbg(&client->dev, "transmit: %d byte\n", msg.len - 7);
 			else
 				goto exit;
 
@@ -321,7 +413,6 @@ static int rs_i2c_master_recv(struct m031_data *m031dev, size_t len)
 
 	while(len > 0) {
 		unsigned char head_info[7];
-		rs_wait_flash_ready(m031dev);
 		if (len > W25Q64_PAGE_LENGTH) {
 			head_info[0] = read_flash;
 			head_info[1] = (unsigned char)((flash_addr & 0xff0000) >> 16);
@@ -338,7 +429,7 @@ static int rs_i2c_master_recv(struct m031_data *m031dev, size_t len)
 			msg[0].buf = head_info;
 			ret = i2c_transfer(adap, &msg[0], 1);
 			if (ret == 1)
-				dev_dbg(&client->dev, "transmit: %d byte\n", msg[0].len);
+				dev_dbg(&client->dev, "receive: %d byte\n", msg[0].len);
 			else
 				goto exit;
 			
@@ -352,11 +443,11 @@ static int rs_i2c_master_recv(struct m031_data *m031dev, size_t len)
 			msg[1].buf = buffer;
 			ret = i2c_transfer(adap, &msg[1], 1);
 			if (ret == 1)
-				dev_dbg(&client->dev, "transmit: 256 byte\n");
+				dev_dbg(&client->dev, "receive: %d byte\n", msg[1].len);
 			else
 				goto exit;
 
-			memcpy(&m031dev->rx_buffer[count], &buffer[count], W25Q64_PAGE_LENGTH);
+			memcpy(&m031dev->rx_buffer[count], buffer, W25Q64_PAGE_LENGTH);
 
 			count += W25Q64_PAGE_LENGTH;
 			len -= W25Q64_PAGE_LENGTH;
@@ -377,10 +468,10 @@ static int rs_i2c_master_recv(struct m031_data *m031dev, size_t len)
 			msg[0].buf = head_info;
 			ret = i2c_transfer(adap, &msg[0], 1);
 			if (ret == 1)
-				dev_dbg(&client->dev, "transmit: %d byte\n", msg[0].len);
+				dev_dbg(&client->dev, "receive: %d byte\n", msg[0].len);
 			else
 				goto exit;
-			
+
 			buffer = kzalloc(len, GFP_KERNEL);
 			if (!buffer)
 				return-ENOMEM;
@@ -391,7 +482,7 @@ static int rs_i2c_master_recv(struct m031_data *m031dev, size_t len)
 			msg[1].buf = buffer;
 			ret = i2c_transfer(adap, &msg[1], 1);
 			if (ret == 1)
-				dev_dbg(&client->dev, "transmit: %ld byte\n", len);
+				dev_dbg(&client->dev, "receive: %ld byte\n", len);
 			else
 				goto exit;
 
@@ -501,11 +592,16 @@ static int rs_i2c_w25x_sector_erase(struct m031_data *m031dev, unsigned long siz
 		ret = i2c_transfer(adap, &msg, 1);
 		if (ret == 1)
 			dev_dbg(&client->dev, "4 KB block erase...");
+		else {
+			dev_err(&client->dev, "i2c transfer error\n");
+			goto exit;
+		}
 		flash_addr += W25Q64_SECTOR;
 		if (!rs_wait_flash_ready(m031dev))
 			dev_dbg(&client->dev, "OK\n");
 	}
 
+exit:
 	return ret;
 }
 
